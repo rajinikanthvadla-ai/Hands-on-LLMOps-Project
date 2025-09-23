@@ -82,9 +82,11 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'push') || 
-      (github.event_name == 'pull_request') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'deploy' && !github.event.inputs.force_deploy)
+      github.event_name == 'push' || 
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && 
+       (github.event.inputs.job_type == 'deploy' || github.event.inputs.job_type == null) && 
+       github.event.inputs.force_deploy != 'true')
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
     steps:

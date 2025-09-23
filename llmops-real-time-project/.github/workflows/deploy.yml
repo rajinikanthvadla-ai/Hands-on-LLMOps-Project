@@ -1,0 +1,279 @@
+name: LLMOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      image_tag:
+        description: 'Custom image tag (optional)'
+        required: false
+        default: ''
+      force_deploy:
+        description: 'Force deployment (skip tests)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY_URI }}
+  IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}
+
+jobs:
+  # Data Pipeline Job
+  data-pipeline:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, '[data]') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install Dependencies
+        run: |
+          cd data_pipeline
+          pip install -r ../model_service/requirements.txt
+          pip install pandas boto3 faiss-cpu
+
+      - name: Run Data Pipeline
+        env:
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          S3_FAISS_PREFIX: faiss_index
+        run: |
+          cd data_pipeline
+          python process_data.py
+
+      - name: Verify S3 Upload
+        run: |
+          aws s3 ls s3://${{ secrets.S3_BUCKET_NAME }}/faiss_index/
+          echo "✅ Data pipeline completed successfully"
+
+  # Build and Test Job
+  build-test:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.inputs.force_deploy }}
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./model_service
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}:${{ env.ENVIRONMENT }}-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Security Scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            ${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }}
+
+      - name: Test Image
+        run: |
+          # Run basic smoke tests
+          docker run --rm --name test-container \
+            -e S3_BUCKET_NAME=test \
+            -e HUGGINGFACEHUB_API_TOKEN=test \
+            -e DYNAMODB_FEEDBACK_TABLE=test \
+            --entrypoint python \
+            ${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }} \
+            -c "import fastapi, langchain_community; print('✅ Dependencies OK')"
+
+  # Staging Deployment
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    if: |
+      always() && 
+      (needs.build-test.result == 'success' || github.event.inputs.force_deploy == 'true') &&
+      ((github.event.inputs.environment == 'staging') || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+    environment:
+      name: staging
+      url: http://${{ steps.deploy.outputs.load-balancer-ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to Staging EKS
+        id: deploy
+        run: |
+          aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply staging manifests
+          kubectl apply -f k8s/staging/
+          
+          # Update deployment image
+          kubectl set image deployment/llmops-chatbot-deployment \
+            chatbot=${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }} \
+            --namespace=staging
+          
+          # Wait for rollout
+          kubectl rollout status deployment/llmops-chatbot-deployment --namespace=staging --timeout=600s
+          
+          # Get service IP (fallback to hostname if IP not available)
+          LOAD_BALANCER_IP=$(kubectl get service llmops-chatbot-service --namespace=staging -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          if [ -z "$LOAD_BALANCER_IP" ]; then
+            LOAD_BALANCER_IP=$(kubectl get service llmops-chatbot-service --namespace=staging -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          fi
+          echo "load-balancer-ip=$LOAD_BALANCER_IP" >> $GITHUB_OUTPUT
+
+      - name: Health Check
+        run: |
+          sleep 30
+          LOAD_BALANCER_IP="${{ steps.deploy.outputs.load-balancer-ip }}"
+          if [ -n "$LOAD_BALANCER_IP" ]; then
+            curl -f http://$LOAD_BALANCER_IP/health || exit 1
+            echo "✅ Staging deployment healthy"
+          else
+            echo "⚠️ Load balancer IP not available yet, skipping health check"
+          fi
+
+  # Production Deployment (Manual Approval)
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [build-test, deploy-staging]
+    if: |
+      always() && 
+      (needs.build-test.result == 'success' || github.event.inputs.force_deploy == 'true') &&
+      ((github.event.inputs.environment == 'production') || github.ref == 'refs/heads/main') &&
+      needs.deploy-staging.result == 'success'
+    environment:
+      name: production
+      url: http://${{ steps.deploy.outputs.load-balancer-ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Blue-Green Deployment to Production
+        id: deploy
+        run: |
+          aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply production manifests
+          kubectl apply -f k8s/production/
+          
+          # Create backup of current deployment
+          kubectl get deployment llmops-chatbot-deployment --namespace=production -o yaml > backup-deployment.yaml || true
+          
+          # Update production deployment with rolling update
+          kubectl set image deployment/llmops-chatbot-deployment \
+            chatbot=${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }} \
+            --namespace=production
+          
+          # Wait for rollout with timeout
+          kubectl rollout status deployment/llmops-chatbot-deployment --namespace=production --timeout=600s
+          
+          # Get service IP (fallback to hostname if IP not available)
+          LOAD_BALANCER_IP=$(kubectl get service llmops-chatbot-service --namespace=production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          if [ -z "$LOAD_BALANCER_IP" ]; then
+            LOAD_BALANCER_IP=$(kubectl get service llmops-chatbot-service --namespace=production -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          fi
+          echo "load-balancer-ip=$LOAD_BALANCER_IP" >> $GITHUB_OUTPUT
+
+      - name: Production Health Check
+        run: |
+          sleep 60
+          LOAD_BALANCER_IP="${{ steps.deploy.outputs.load-balancer-ip }}"
+          
+          if [ -n "$LOAD_BALANCER_IP" ]; then
+            # Extended health checks
+            curl -f http://$LOAD_BALANCER_IP/health || exit 1
+            
+            # Test chat endpoint
+            response=$(curl -s -X POST http://$LOAD_BALANCER_IP/chat \
+              -H "Content-Type: application/json" \
+              -d '{"query": "test"}')
+            
+            if [[ $response == *"answer"* ]]; then
+              echo "✅ Production deployment healthy"
+            else
+              echo "❌ Production health check failed"
+              exit 1
+            fi
+          else
+            echo "⚠️ Load balancer IP not available yet, skipping health check"
+          fi
+
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          echo "🔄 Rolling back deployment"
+          kubectl rollout undo deployment/llmops-chatbot-deployment --namespace=production
+          kubectl rollout status deployment/llmops-chatbot-deployment --namespace=production
+
+  # Notification Job
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    steps:
+      - name: Notify Deployment Status
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || 'staging') }}"
+          if [[ "${{ needs.deploy-staging.result }}" == "success" && "${{ needs.deploy-production.result }}" == "success" ]]; then
+            echo "🚀 Deployment successful to $ENVIRONMENT"
+          elif [[ "${{ needs.deploy-staging.result }}" == "failure" || "${{ needs.deploy-production.result }}" == "failure" ]]; then
+            echo "❌ Deployment failed to $ENVIRONMENT"
+          fi
+
+

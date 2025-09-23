@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llmops-chatbot-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llmops-chatbot
+  template:
+    metadata:
+      labels:
+        app: llmops-chatbot
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: chatbot
+          image: YOUR_ECR_URI:v1.0  # ⚠️ REPLACE with actual ECR URI from Step 1.4
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: chatbot-secrets
+
+

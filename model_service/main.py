@@ -22,7 +22,7 @@ DYNAMODB_TABLE = os.getenv("DYNAMODB_FEEDBACK_TABLE")
 
 app = FastAPI(title="LLMOps Chatbot")
 qa_chain = None
-tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
+tokenizer = None
 
 
 # Prometheus Metrics
@@ -48,12 +48,18 @@ def download_faiss_from_s3(local_dir: str) -> None:
 
 @app.on_event("startup")
 def startup_event() -> None:
-    global qa_chain
+    global qa_chain, tokenizer
 
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET_NAME env var is required")
     if not HF_TOKEN:
         raise RuntimeError("HUGGINGFACEHUB_API_TOKEN env var is required")
+
+    # Initialize tokenizer with authentication
+    tokenizer = AutoTokenizer.from_pretrained(
+        "mistralai/Mistral-7B-Instruct-v0.1",
+        token=HF_TOKEN
+    )
 
     # Initialize components
     embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -102,7 +108,7 @@ def health():
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    if not qa_chain:
+    if not qa_chain or not tokenizer:
         raise HTTPException(status_code=503, detail="Service initializing")
 
     # Token counting

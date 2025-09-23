@@ -7,14 +7,16 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      job_type:
-        description: 'What to run'
-        required: true
-        default: 'deploy'
-        type: choice
-        options:
-        - deploy
-        - data-only
+      run_build_test:
+        description: 'Run build and test pipeline'
+        required: false
+        default: true
+        type: boolean
+      run_data_pipeline:
+        description: 'Run data pipeline'
+        required: false
+        default: false
+        type: boolean
       environment:
         description: 'Deployment environment (for deploy jobs)'
         required: false
@@ -47,7 +49,8 @@ jobs:
       - name: Show workflow inputs
         run: |
           echo "Event: ${{ github.event_name }}"
-          echo "Job Type: '${{ github.event.inputs.job_type }}'"
+          echo "Run Build Test: ${{ github.event.inputs.run_build_test }}"
+          echo "Run Data Pipeline: ${{ github.event.inputs.run_data_pipeline }}"
           echo "Environment: '${{ github.event.inputs.environment }}'"
           echo "Force Deploy: ${{ github.event.inputs.force_deploy }}"
           echo "Image Tag: '${{ github.event.inputs.image_tag }}'"
@@ -55,7 +58,9 @@ jobs:
   # Data Pipeline Job
   data-pipeline:
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.message, '[data]') || (github.event_name == 'workflow_dispatch' && github.event.inputs.job_type == 'data-only')
+    if: |
+      contains(github.event.head_commit.message, '[data]') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_data_pipeline == true)
     steps:
       - uses: actions/checkout@v4
 
@@ -98,8 +103,8 @@ jobs:
       github.event_name == 'push' || 
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && 
-       github.event.inputs.job_type == 'deploy' && 
-       github.event.inputs.force_deploy == false)
+       github.event.inputs.run_build_test == true && 
+       github.event.inputs.force_deploy != true)
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
     steps:

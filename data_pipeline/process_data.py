@@ -17,7 +17,24 @@ def main() -> None:
 
     print("📚 Loading data...")
     df = pd.read_csv("data/it_support_faq.csv")
+    
+    # Drop any rows with null values to prevent processing errors
+    df = df.dropna()
+    
+    # Convert all columns to string to handle any unexpected data types
+    df["question"] = df["question"].astype(str)
+    df["answer"] = df["answer"].astype(str)
+    
+    # Create texts by combining question and answer
     texts = (df["question"] + " \nAnswer: " + df["answer"]).tolist()
+    
+    # Filter out any empty or whitespace-only texts
+    texts = [text.strip() for text in texts if text.strip()]
+    
+    if not texts:
+        raise ValueError("No valid text data found after processing CSV file")
+    
+    print(f"📄 Processing {len(texts)} text entries...")
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     docs = text_splitter.create_documents(texts)
@@ -37,47 +54,6 @@ def main() -> None:
 
     print("✅ Data pipeline complete!")
 
-
-if __name__ == "__main__":
-    main()
-
-# -*- coding: utf-8 -*-
-import os
-import pandas as pd
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-import boto3
-
-# Configuration - UPDATE THIS WITH YOUR BUCKET NAME
-S3_BUCKET_NAME = "llmops-knowledge-base"
-S3_FAISS_INDEX_KEY = "faiss_index"
-LOCAL_FAISS_PATH = "faiss_index_local"
-
-def main():
-    print("Initializing embedding model...")
-    embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-    print("Loading data...")
-    df = pd.read_csv("data/it_support_faq.csv")
-    texts = (df['question'] + " \nAnswer: " + df['answer']).tolist()
-    
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    docs = text_splitter.create_documents(texts)
-    
-    print("Creating FAISS vector index...")
-    vectorstore = FAISS.from_documents(docs, embed_model)
-    vectorstore.save_local(LOCAL_FAISS_PATH)
-    
-    print(f"Uploading index to S3 bucket: {S3_BUCKET_NAME}...")
-    s3_client = boto3.client('s3')
-    for file in os.listdir(LOCAL_FAISS_PATH):
-        local_path = os.path.join(LOCAL_FAISS_PATH, file)
-        s3_key = os.path.join(S3_FAISS_INDEX_KEY, file)
-        s3_client.upload_file(local_path, S3_BUCKET_NAME, s3_key)
-        print(f"Uploaded {file}")
-    
-    print("Data pipeline complete!")
 
 if __name__ == "__main__":
     main()

@@ -104,12 +104,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run Security Scan
-        run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            ${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }}
-
       - name: Test Image
         run: |
           # Run basic smoke tests

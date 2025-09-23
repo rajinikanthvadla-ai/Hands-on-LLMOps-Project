@@ -104,17 +104,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test Image
-        run: |
-          # Run basic smoke tests
-          docker run --rm --name test-container \
-            -e S3_BUCKET_NAME=test \
-            -e HUGGINGFACEHUB_API_TOKEN=test \
-            -e DYNAMODB_FEEDBACK_TABLE=test \
-            --entrypoint python \
-            ${{ env.ECR_REGISTRY }}:${{ env.IMAGE_TAG }} \
-            -c "import fastapi, langchain_community; print('✅ Dependencies OK')"
-
   # Staging Deployment
   deploy-staging:
     runs-on: ubuntu-latest

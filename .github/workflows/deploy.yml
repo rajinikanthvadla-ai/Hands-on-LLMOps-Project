@@ -96,6 +96,27 @@ jobs:
           aws s3 ls s3://${{ secrets.S3_BUCKET_NAME }}/faiss_index/
           echo "✅ Data pipeline completed successfully"
 
+  # Simple Test Job - Always runs on manual trigger to debug
+  test-conditions:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Test all conditions
+        run: |
+          echo "=== TESTING CONDITIONS ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "run_build_test input: '${{ github.event.inputs.run_build_test }}'"
+          echo "force_deploy input: '${{ github.event.inputs.force_deploy }}'"
+          echo ""
+          echo "=== CONDITION TESTS ==="
+          echo "Test 1 - run_build_test == true: ${{ github.event.inputs.run_build_test == true }}"
+          echo "Test 2 - run_build_test == 'true': ${{ github.event.inputs.run_build_test == 'true' }}"
+          echo "Test 3 - force_deploy != true: ${{ github.event.inputs.force_deploy != true }}"
+          echo "Test 4 - force_deploy != 'true': ${{ github.event.inputs.force_deploy != 'true' }}"
+          echo ""
+          echo "=== FINAL BUILD-TEST CONDITION ==="
+          echo "Should build-test run? ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_build_test == true && github.event.inputs.force_deploy != true }}"
+
   # Build and Test Job
   build-test:
     runs-on: ubuntu-latest
@@ -103,8 +124,8 @@ jobs:
       github.event_name == 'push' || 
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && 
-       github.event.inputs.run_build_test == true && 
-       github.event.inputs.force_deploy != true)
+       github.event.inputs.run_build_test == 'true' && 
+       github.event.inputs.force_deploy == 'false')
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
     steps:

@@ -1,0 +1,70 @@
+name: Test Build Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_build_test:
+        description: 'Run build and test pipeline'
+        required: false
+        default: true
+        type: boolean
+      environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      force_deploy:
+        description: 'Force deployment (skip tests)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY_URI }}
+  IMAGE_TAG: ${{ github.sha }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+jobs:
+  # Debug Job
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show workflow inputs
+        run: |
+          echo "=== WORKFLOW DEBUG ==="
+          echo "Event: ${{ github.event_name }}"
+          echo "Run Build Test: '${{ github.event.inputs.run_build_test }}'"
+          echo "Environment: '${{ github.event.inputs.environment }}'"
+          echo "Force Deploy: '${{ github.event.inputs.force_deploy }}'"
+          echo ""
+          echo "=== CONDITION TESTS ==="
+          echo "run_build_test == true: ${{ github.event.inputs.run_build_test == true }}"
+          echo "run_build_test == 'true': ${{ github.event.inputs.run_build_test == 'true' }}"
+          echo "force_deploy == false: ${{ github.event.inputs.force_deploy == false }}"
+          echo "force_deploy == 'false': ${{ github.event.inputs.force_deploy == 'false' }}"
+
+  # Simple Build Test
+  build-test-simple:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_build_test == 'true' && github.event.inputs.force_deploy == 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test build conditions
+        run: |
+          echo "✅ BUILD-TEST JOB IS RUNNING!"
+          echo "This proves the conditions work"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+
+  # Alternative Build Test with different condition
+  build-test-alt:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.run_build_test == true && github.event.inputs.force_deploy != true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Alternative build test
+        run: |
+          echo "✅ ALTERNATIVE BUILD-TEST JOB IS RUNNING!"
+          echo "Using boolean comparison instead of string"

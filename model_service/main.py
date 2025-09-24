@@ -5,19 +5,50 @@ import boto3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain.chains import RetrievalQA
-from langchain_community.llms import HuggingFaceHub
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.llms.base import LLM
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, pipeline
+from typing import Optional, List, Any
 
 
 # Environment configuration
 S3_BUCKET = os.getenv("S3_BUCKET_NAME")
 S3_FAISS_PREFIX = os.getenv("S3_FAISS_PREFIX", "faiss_index")
-HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 DYNAMODB_TABLE = os.getenv("DYNAMODB_FEEDBACK_TABLE")
+
+
+# Simple local LLM that doesn't need HuggingFace Hub authentication
+class LocalLLM(LLM):
+    pipeline: Any = None
+    
+    def __init__(self):
+        super().__init__()
+        # Use a small, fast model that doesn't need authentication
+        self.pipeline = pipeline("text-generation", model="distilgpt2", device=-1)
+    
+    @property
+    def _llm_type(self) -> str:
+        return "local_transformers"
+    
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        # Generate response using local model
+        response = self.pipeline(prompt, max_length=200, num_return_sequences=1, pad_token_id=50256)
+        generated_text = response[0]['generated_text']
+        
+        # Clean up the response (remove the original prompt)
+        if generated_text.startswith(prompt):
+            generated_text = generated_text[len(prompt):].strip()
+        
+        # Simple cleanup for better responses
+        if stop:
+            for stop_word in stop:
+                if stop_word in generated_text:
+                    generated_text = generated_text.split(stop_word)[0]
+        
+        return generated_text[:500]  # Limit response length
 
 
 app = FastAPI(title="LLMOps Chatbot")
@@ -52,10 +83,9 @@ def startup_event() -> None:
 
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET_NAME env var is required")
-    # HF_TOKEN not required for open models like flan-t5-small
 
-    # Initialize tokenizer with open model (no authentication needed)
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
+    # Initialize tokenizer with simple model (no authentication needed)
+    tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
 
     # Initialize components
     embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -66,11 +96,8 @@ def startup_event() -> None:
     download_faiss_from_s3(local_index_dir)
     vectorstore = FAISS.load_local(local_index_dir, embed_model, allow_dangerous_deserialization=True)
 
-    # Initialize LLM with open model (no token needed)
-    llm = HuggingFaceHub(
-        repo_id="google/flan-t5-small",
-        model_kwargs={"temperature": 0.1, "max_length": 512},
-    )
+    # Initialize local LLM (no HuggingFace Hub needed)
+    llm = LocalLLM()
 
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever())
 

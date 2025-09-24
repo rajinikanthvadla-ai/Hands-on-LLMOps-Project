@@ -52,14 +52,10 @@ def startup_event() -> None:
 
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET_NAME env var is required")
-    if not HF_TOKEN:
-        raise RuntimeError("HUGGINGFACEHUB_API_TOKEN env var is required")
+    # HF_TOKEN not required for open models like flan-t5-small
 
-    # Initialize tokenizer with authentication
-    tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Mistral-7B-Instruct-v0.1",
-        token=HF_TOKEN
-    )
+    # Initialize tokenizer with open model (no authentication needed)
+    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
 
     # Initialize components
     embed_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
@@ -70,11 +66,10 @@ def startup_event() -> None:
     download_faiss_from_s3(local_index_dir)
     vectorstore = FAISS.load_local(local_index_dir, embed_model, allow_dangerous_deserialization=True)
 
-    # Initialize LLM
+    # Initialize LLM with open model (no token needed)
     llm = HuggingFaceHub(
-        repo_id="mistralai/Mistral-7B-Instruct-v0.1",
+        repo_id="google/flan-t5-small",
         model_kwargs={"temperature": 0.1, "max_length": 512},
-        huggingfacehub_api_token=HF_TOKEN,
     )
 
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever())

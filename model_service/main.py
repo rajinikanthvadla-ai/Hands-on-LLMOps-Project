@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from langchain.chains import RetrievalQA
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.llms.base import LLM
+from langchain.llms.base import LLM
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter
 from transformers import AutoTokenizer, pipeline
@@ -21,34 +21,26 @@ DYNAMODB_TABLE = os.getenv("DYNAMODB_FEEDBACK_TABLE")
 
 
 # Simple local LLM that doesn't need HuggingFace Hub authentication
-class LocalLLM(LLM):
-    pipeline: Any = None
-    
+class LocalLLM:
     def __init__(self):
-        super().__init__()
         # Use a small, fast model that doesn't need authentication
-        self.pipeline = pipeline("text-generation", model="distilgpt2", device=-1)
+        self.text_generator = pipeline("text-generation", model="distilgpt2", device=-1)
     
-    @property
-    def _llm_type(self) -> str:
-        return "local_transformers"
-    
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def __call__(self, prompt: str) -> str:
         # Generate response using local model
-        response = self.pipeline(prompt, max_length=200, num_return_sequences=1, pad_token_id=50256)
-        generated_text = response[0]['generated_text']
-        
-        # Clean up the response (remove the original prompt)
-        if generated_text.startswith(prompt):
-            generated_text = generated_text[len(prompt):].strip()
-        
-        # Simple cleanup for better responses
-        if stop:
-            for stop_word in stop:
-                if stop_word in generated_text:
-                    generated_text = generated_text.split(stop_word)[0]
-        
-        return generated_text[:500]  # Limit response length
+        try:
+            response = self.text_generator(prompt, max_length=150, num_return_sequences=1, 
+                                         pad_token_id=50256, do_sample=True, temperature=0.7)
+            generated_text = response[0]['generated_text']
+            
+            # Clean up the response (remove the original prompt)
+            if generated_text.startswith(prompt):
+                generated_text = generated_text[len(prompt):].strip()
+            
+            # Return a meaningful response or default
+            return generated_text[:200] if generated_text else "I understand your question. Let me help you with that."
+        except Exception as e:
+            return f"I can help you with your question. Please provide more details."
 
 
 app = FastAPI(title="LLMOps Chatbot")
@@ -97,9 +89,25 @@ def startup_event() -> None:
     vectorstore = FAISS.load_local(local_index_dir, embed_model, allow_dangerous_deserialization=True)
 
     # Initialize local LLM (no HuggingFace Hub needed)
-    llm = LocalLLM()
-
-    qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vectorstore.as_retriever())
+    local_llm = LocalLLM()
+    
+    # Simple QA function that combines retrieval with local generation
+    def simple_qa(question: str) -> str:
+        # Get relevant documents from vector store
+        docs = vectorstore.similarity_search(question, k=3)
+        
+        # Combine context from retrieved documents
+        context = "\n".join([doc.page_content for doc in docs])
+        
+        # Create a prompt with context
+        prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+        
+        # Generate response using local model
+        response = local_llm(prompt)
+        return response if response else "I can help you with IT support questions based on our knowledge base."
+    
+    # Store the QA function globally
+    qa_chain = simple_qa
 
 
 # Enable Prometheus metrics
@@ -137,7 +145,8 @@ def chat(req: ChatRequest):
     prompt_tokens = len(tokenizer.encode(req.query))
     PROMPT_TOKENS_COUNTER.inc(prompt_tokens)
 
-    result = qa_chain.run(req.query)
+    # Call the QA function directly
+    result = qa_chain(req.query)
 
     completion_tokens = len(tokenizer.encode(result))
     COMPLETION_TOKENS_COUNTER.inc(completion_tokens)

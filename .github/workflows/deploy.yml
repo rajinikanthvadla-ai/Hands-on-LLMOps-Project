@@ -185,17 +185,12 @@ jobs:
           # Create namespace if it doesn't exist
           kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
           
-          # Create/update secrets with GitHub secrets
-          kubectl create secret generic chatbot-secrets \
-            --from-literal=S3_BUCKET_NAME="${{ secrets.S3_BUCKET_NAME }}" \
-            --from-literal=S3_FAISS_PREFIX="faiss_index" \
-            --from-literal=HUGGINGFACEHUB_API_TOKEN="${{ secrets.HUGGINGFACEHUB_API_TOKEN }}" \
-            --from-literal=DYNAMODB_FEEDBACK_TABLE="llmops-feedback-log" \
-            --namespace=staging \
-            --dry-run=client -o yaml | kubectl apply -f -
+          # Process secrets YAML with environment variable substitution
+          export HUGGINGFACEHUB_API_TOKEN="${{ secrets.HUGGINGFACEHUB_API_TOKEN }}"
+          envsubst < k8s/staging/secrets.yaml | kubectl apply -f -
           
-          # Apply staging manifests
-          kubectl apply -f k8s/staging/
+          # Apply other staging manifests (excluding secrets.yaml to avoid conflict)
+          find k8s/staging/ -name "*.yaml" ! -name "secrets.yaml" -exec kubectl apply -f {} \;
           
           # Update deployment image
           kubectl set image deployment/llmops-chatbot-deployment \
@@ -253,17 +248,12 @@ jobs:
           # Create namespace if it doesn't exist
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
           
-          # Create/update secrets with GitHub secrets
-          kubectl create secret generic chatbot-secrets \
-            --from-literal=S3_BUCKET_NAME="${{ secrets.S3_BUCKET_NAME }}" \
-            --from-literal=S3_FAISS_PREFIX="faiss_index" \
-            --from-literal=HUGGINGFACEHUB_API_TOKEN="${{ secrets.HUGGINGFACEHUB_API_TOKEN }}" \
-            --from-literal=DYNAMODB_FEEDBACK_TABLE="llmops-feedback-log" \
-            --namespace=production \
-            --dry-run=client -o yaml | kubectl apply -f -
+          # Process secrets YAML with environment variable substitution
+          export HUGGINGFACEHUB_API_TOKEN="${{ secrets.HUGGINGFACEHUB_API_TOKEN }}"
+          envsubst < k8s/production/secrets.yaml | kubectl apply -f -
           
-          # Apply production manifests
-          kubectl apply -f k8s/production/
+          # Apply other production manifests (excluding secrets.yaml to avoid conflict)
+          find k8s/production/ -name "*.yaml" ! -name "secrets.yaml" -exec kubectl apply -f {} \;
           
           # Create backup of current deployment
           kubectl get deployment llmops-chatbot-deployment --namespace=production -o yaml > backup-deployment.yaml || true
